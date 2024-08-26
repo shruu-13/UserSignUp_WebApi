@@ -1,5 +1,8 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
@@ -15,11 +18,13 @@ namespace UserSignUp_WebApi.Controllers
 	{
 		private readonly DataContext _context;
 		private readonly EmailService _emailService;
+		private readonly IConfiguration _configuration;
 
-		public UserController(DataContext context, EmailService emailService)
+		public UserController(DataContext context, EmailService emailService, IConfiguration configuration)
 		{
 			_context = context;
 			_emailService = emailService;
+			_configuration = configuration;
 		}
 
 		[HttpPost("register")]
@@ -69,7 +74,38 @@ namespace UserSignUp_WebApi.Controllers
 				return BadRequest("Email not verified.");
 			}
 
-			return Ok($"Welcome back, {user.Email}! :)");
+			var token = GenerateJwtToken(user);
+
+			//return Ok(new { Token = token });
+			return Ok("Welcome!");
+		}
+
+		[HttpPost("generate-token")]
+		public IActionResult GenerateToken([FromBody] UserLoginRequest request)
+		{
+			var user = _context.Users.FirstOrDefault(u => u.Email == request.Email);
+			if (user == null || !VerifyPasswordHash(request.Password, user.PasswordHash, user.PassworfSalt))
+			{
+				return BadRequest("Invalid credentials.");
+			}
+
+			var claims = new[]
+			{
+			new Claim(ClaimTypes.Email, user.Email),
+			new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())
+		};
+
+			var token = GenerateJwtToken(claims);
+			return Ok(new { Token = token });
+		}
+
+
+		[HttpPost("refresh-token")]
+		public IActionResult RefreshToken([FromBody] TokenRequest request)
+		{
+			var principal = GetPrincipalFromExpiredToken(request.ExpiredToken);
+			var newToken = GenerateJwtToken(principal.Claims);
+			return Ok(new { Token = newToken });
 		}
 
 		[HttpPost("verify")]
@@ -149,6 +185,56 @@ namespace UserSignUp_WebApi.Controllers
 		private string CreateRandomToken()
 		{
 			return Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+		}
+
+		private string GenerateJwtToken(User user)
+		{
+			var tokenHandler = new JwtSecurityTokenHandler();
+			var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
+			var tokenDescriptor = new SecurityTokenDescriptor
+			{
+				Subject = new ClaimsIdentity(new[]
+				{
+					new Claim(ClaimTypes.Email, user.Email),
+					new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())
+				}),
+				Expires = DateTime.UtcNow.AddHours(1),
+				Issuer = _configuration["Jwt:Issuer"],
+				SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+			};
+			var token = tokenHandler.CreateToken(tokenDescriptor);
+			return tokenHandler.WriteToken(token);
+		}
+
+		private string GenerateJwtToken(IEnumerable<Claim> claims)
+		{
+			var tokenHandler = new JwtSecurityTokenHandler();
+			var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
+			var tokenDescriptor = new SecurityTokenDescriptor
+			{
+				Subject = new ClaimsIdentity(claims),
+				Expires = DateTime.UtcNow.AddHours(1),
+				Issuer = _configuration["Jwt:Issuer"],
+				SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+			};
+			var token = tokenHandler.CreateToken(tokenDescriptor);
+			return tokenHandler.WriteToken(token);
+		}
+		 
+		private ClaimsPrincipal GetPrincipalFromExpiredToken(string token)
+		{
+			var tokenHandler = new JwtSecurityTokenHandler();
+			var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
+			var validationParameters = new TokenValidationParameters
+			{
+				ValidateIssuer = false,
+				ValidateAudience = false,
+				ValidateLifetime = false,
+				ValidateIssuerSigningKey = true,
+				IssuerSigningKey = new SymmetricSecurityKey(key)
+			};
+			var principal = tokenHandler.ValidateToken(token, validationParameters, out var validatedToken);
+			return principal;
 		}
 	}
 }
